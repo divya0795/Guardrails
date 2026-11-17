@@ -219,13 +219,31 @@ class EmbeddingsCache:
         key_generator: KeyGenerator,
         cache_store: CacheStore,
         store_config: Optional[dict] = None,
+        namespace: str = "",
     ):
+        """Initialize the embeddings cache.
+
+        Args:
+            key_generator: Generates the cache key for a text.
+            cache_store: Stores the cached embeddings.
+            store_config: The configuration the cache store was built with.
+            namespace: Identifies the embedding model the cached vectors belong to.
+                Texts are keyed together with it, so caches shared by different
+                models (for example a persistent filesystem store) don't mix vectors.
+        """
         self._key_generator = key_generator
         self._cache_store = cache_store
         self._store_config = store_config or {}
+        self._namespace = namespace
+
+    def _generate_key(self, text: str) -> str:
+        if not self._namespace:
+            return self._key_generator.generate_key(text)
+        # The namespace is JSON, so it never contains a raw newline.
+        return self._key_generator.generate_key(f"{self._namespace}\n{text}")
 
     @classmethod
-    def from_dict(cls, d: Dict[str, str]):
+    def from_dict(cls, d: Dict[str, str], namespace: str = ""):
         key_generator = KeyGenerator.from_name(d.get("key_generator"))()
         store_config_raw = d.get("store_config")
         store_config: dict = store_config_raw if isinstance(store_config_raw, dict) else {}
@@ -235,12 +253,13 @@ class EmbeddingsCache:
             key_generator=key_generator,
             cache_store=cache_store,
             store_config=store_config,
+            namespace=namespace,
         )
 
     @classmethod
-    def from_config(cls, config: EmbeddingsCacheConfig):
+    def from_config(cls, config: EmbeddingsCacheConfig, namespace: str = ""):
         # config is of type EmbeddingSearchProvider
-        return cls.from_dict(config.to_dict())
+        return cls.from_dict(config.to_dict(), namespace=namespace)
 
     def get_config(self):
         return EmbeddingsCacheConfig(
@@ -255,7 +274,7 @@ class EmbeddingsCache:
 
     @get.register(str)
     def _(self, text: str):
-        key = self._key_generator.generate_key(text)
+        key = self._generate_key(text)
         log.info(f"Fetching key {key} for text '{text[:20]}...' from cache")
 
         result = self._cache_store.get(key)
@@ -282,7 +301,7 @@ class EmbeddingsCache:
 
     @set.register(str)
     def _(self, text: str, value: List[float]):
-        key = self._key_generator.generate_key(text)
+        key = self._generate_key(text)
         log.info(f"Cache miss for text '{text}'. Storing key {key} in cache.")
         self._cache_store.set(key, value)
 
@@ -295,11 +314,31 @@ class EmbeddingsCache:
         self._cache_store.clear()
 
 
+def _embedding_model_namespace(obj) -> str:
+    """Build the cache namespace from the embedding engine, model and parameters of `obj`.
+
+    Returns an empty string when `obj` has none of them, which keeps the plain text key.
+    """
+    engine = getattr(obj, "embedding_engine", None)
+    model = getattr(obj, "embedding_model", None)
+    params = getattr(obj, "embedding_params", None) or {}
+    if engine is None and model is None and not params:
+        return ""
+    return json.dumps(
+        {"engine": engine, "model": model, "params": params},
+        sort_keys=True,
+        default=str,
+    )
+
+
 def cache_embeddings(func):
     """Decorator to cache the embeddings.
 
     This decorator caches the embeddings in the cache store.
     It uses the `cache_config` attribute of the class to configure the cache.
+    Cache keys include the class's `embedding_engine`, `embedding_model` and
+    `embedding_params` attributes when present, so vectors from one model are
+    never returned for another.
 
     If the class does not have a `cache_config` attribute, it will use the `EmbeddingsCacheConfig` by default.
     This decorator can be applied to the `_get_embeddings` method of a subclass of `EmbeddingsIndex` that accepts a list of strings and returns a list of lists of floats.
@@ -331,7 +370,10 @@ def cache_embeddings(func):
 
         embeddings_cache = getattr(self, "_embeddings_cache", None)
         if embeddings_cache is None:
-            embeddings_cache = EmbeddingsCache.from_config(self.cache_config)
+            embeddings_cache = EmbeddingsCache.from_config(
+                self.cache_config,
+                namespace=_embedding_model_namespace(self),
+            )
             self._embeddings_cache = embeddings_cache
 
         cached_texts = {}

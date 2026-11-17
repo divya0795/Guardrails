@@ -343,3 +343,60 @@ def test_from_config_roundtrips_store_config(tmp_path):
     cache = EmbeddingsCache.from_config(cfg)
 
     assert cache.get_config().store_config == cfg.store_config
+
+
+class StubModelEmbeddingIndex:
+    """Mimics BasicEmbeddingsIndex: the vector depends on the configured model."""
+
+    def __init__(self, cache_config, embedding_engine, embedding_model, embedding_params=None, dims=3):
+        self._cache_config = cache_config
+        self.embedding_engine = embedding_engine
+        self.embedding_model = embedding_model
+        self.embedding_params = embedding_params or {}
+        self.dims = dims
+        self.compute_count = 0
+
+    @property
+    def cache_config(self):
+        return self._cache_config
+
+    @cache_embeddings
+    async def _get_embeddings(self, texts):
+        self.compute_count += len(texts)
+        return [[float(self.dims)] * self.dims for _ in texts]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        ({"embedding_model": "model-a"}, {"embedding_model": "model-b", "dims": 5}),
+        ({"embedding_engine": "engine-a"}, {"embedding_engine": "engine-b", "dims": 5}),
+        ({"embedding_params": {"dimensionality": 3}}, {"embedding_params": {"dimensionality": 5}, "dims": 5}),
+    ],
+    ids=["model", "engine", "params"],
+)
+async def test_persistent_cache_is_scoped_to_embedding_model(tmp_path, first, second):
+    """A persistent cache shared by two models must not return one model's vectors for the other."""
+    cache_config = EmbeddingsCacheConfig(
+        enabled=True,
+        store="filesystem",
+        store_config={"cache_dir": str(tmp_path / "embeddings")},
+    )
+
+    def make_index(overrides):
+        kwargs = {"embedding_engine": "engine-a", "embedding_model": "model-a", "embedding_params": {}, "dims": 3}
+        kwargs.update(overrides)
+        return StubModelEmbeddingIndex(cache_config, **kwargs)
+
+    index_a = make_index(first)
+    assert await index_a._get_embeddings(["hello"]) == [[3.0, 3.0, 3.0]]
+
+    index_b = make_index(second)
+    assert await index_b._get_embeddings(["hello"]) == [[5.0] * 5]
+    assert index_b.compute_count == 1
+
+    # The same model still hits its own cache entry from a fresh instance.
+    index_a_again = make_index(first)
+    assert await index_a_again._get_embeddings(["hello"]) == [[3.0, 3.0, 3.0]]
+    assert index_a_again.compute_count == 0
