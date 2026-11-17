@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import logging
-from typing import Dict, Optional
+from typing import Any, Dict
 
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
@@ -48,7 +48,7 @@ class ResponseBody(BaseModel):
     """Response body for action execution."""
 
     status: str = "success"  # success / failed
-    result: Optional[str]
+    result: Any = Field(default=None, description="The value returned by the action. Can be any JSON value.")
 
 
 @app.post(

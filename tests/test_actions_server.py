@@ -55,3 +55,29 @@ def test_get_actions():
     # Check that we have at least one config
     result = response.json()
     assert len(result) >= 1
+
+
+@pytest.mark.parametrize(
+    "action_result",
+    [True, False, 0.75, ["a", "b"], {"text": "x", "score": 1}, "ok", None],
+    ids=["true", "false", "float", "list", "dict", "str", "none"],
+)
+def test_run_returns_non_string_results(monkeypatch, action_result):
+    """Actions can return any JSON value, not only strings.
+
+    The Colang runtimes read ``result`` back as-is, and rail actions
+    commonly return booleans or dicts, so the endpoint must not reject them.
+    """
+
+    async def fake_execute_action(action_name, params):
+        return action_result, "success"
+
+    monkeypatch.setattr(actions_server.app.action_dispatcher, "execute_action", fake_execute_action)
+
+    response = client.post(
+        "/v1/actions/run",
+        json={"action_name": "any_action", "action_parameters": {}},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "success", "result": action_result}
